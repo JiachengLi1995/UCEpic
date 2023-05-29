@@ -17,22 +17,6 @@ InsertionFeatures = namedtuple("InsertionFeatures", "input_ids input_masks aspec
 
 REF_LEN = 128
 
-
-def _debug_tagging(ids, tags, tokenizer):
-    source = []
-    phrase = []
-    for i, t in zip(ids, tags):
-        if t == 1:
-            if len(phrase):
-                source.append(phrase)
-            phrase = [i]
-        elif t == 2:
-            phrase.append(i)
-    if len(phrase):
-        source.append(phrase)
-    return [tokenizer.decode(s) for s in source]
-
-
 def construct_reference(user, item, ref=None, tokenizer=None):
 
     item_tokens = []
@@ -100,39 +84,6 @@ def construct_phrase_reference(user, item, ref=None, tokenizer=None):
     mask[: len(tokens)] = 1
     return tokens, mask
 
-def construct_reference_embeddings(user, item, max_seq_length, sent2order, sent2vec, ref):
-
-    ref_input_array = np.zeros([max_seq_length, 768])
-    ref_input_mask = np.zeros([max_seq_length], dtype=np.int32)
-    ref_input_mask[0] = 1 ## if all zeros, multiatt will output nan
-
-    point = 0
-    for i in ref['user'][user]:
-        if i!=item:
-            start, end = sent2order[str((user, i))]
-            sent_embeds = sent2vec[start:end]
-            sent_num = end - start
-            ref_input_array[point:point+sent_num] = sent_embeds[:max_seq_length-point]
-            ref_input_mask[point:point+sent_num] = 1
-            point += sent_num
-
-        if point >= (max_seq_length * 2 // 3):
-            break
-
-    for u in ref['item'][item]:
-        if u != user:
-            start, end = sent2order[str((u, item))]
-            sent_embeds = sent2vec[start:end]
-            sent_num = end - start
-            ref_input_array[point:point+sent_num] = sent_embeds[:max_seq_length-point]
-            ref_input_mask[point:point+sent_num] = 1
-            point += sent_num
-
-        if point >= max_seq_length:
-            break
-
-    return ref_input_array, ref_input_mask
-
 def construct_aspects(user, item, max_seq_length, ref):
 
     aspects = np.zeros([max_seq_length], dtype=np.int32)
@@ -156,16 +107,14 @@ def construct_aspects(user, item, max_seq_length, ref):
     return aspects, aspects_mask
 
 
-def convert_example_to_insertion_features(example, tokenizer, max_seq_length, args, ref, sent2order, sent2vec):
+def convert_example_to_insertion_features(example, tokenizer, max_seq_length, args, ref):
 
     # ref_input_array, ref_mask_array = construct_reference(
     #     user=example["userid"], item=example["itemid"], ref=ref, tokenizer=tokenizer)
-    # ref_input_array, ref_mask_array = construct_reference_embeddings(
-    #     example["userid"], example["itemid"], max_seq_length, sent2order, sent2vec, ref)
 
     ref_input_array, ref_mask_array = construct_phrase_reference(user=example["userid"], item=example["itemid"], ref=ref, tokenizer=tokenizer)
 
-    aspects, aspects_mask = None, None#construct_aspects(example["userid"], example["itemid"], args.num_aspects, ref)
+    aspects, aspects_mask = construct_aspects(example["userid"], example["itemid"], args.num_aspects, ref)
 
     source_ids = example["source"]
     ins_label = [args.max_ins-1 if i >= args.max_ins else i for i in example["ins_label"]]
@@ -224,124 +173,6 @@ def convert_example_to_insertion_features(example, tokenizer, max_seq_length, ar
                                  lm_labels=lm_label_array)
     return features
 
-
-def convert_example_to_extraction_features(example, tokenizer, max_seq_length, ref=None, mode='train', args=None):
-
-    user = example["userid"]
-    item = example["itemid"]
-
-    # user tokens as reference
-
-    user_tokens = []
-
-    for i in ref['user'][user]:
-        if i == item:
-            continue
-        tmp_ref = ref['review'][ref['user'][user][i]]
-
-        if len(user_tokens) + len(tmp_ref) >= max_seq_length - 2:
-            user_tokens.extend(
-                tmp_ref[-(max_seq_length - 2 - len(user_tokens)):])
-            break
-        user_tokens.extend(tmp_ref)
-
-    user_tokens = [tokenizer.bos_token_id] + \
-        user_tokens + [tokenizer.sep_token_id]
-
-    # item tokens as tagging input
-
-    item_tags = np.zeros(len(example['token_ids']), dtype=np.int32)  # 0 -> "O"
-
-    # item tagging ground truth
-    item_tags_gt = list(item_tags)
-
-    # tagging propagation
-
-    # concat with other item reviews
-
-    item_tokens_gt = example['token_ids']
-    item_token_cnt = len(item_tokens_gt)
-    item_token_list, item_tokens = [], []
-
-    for u in ref['item'][item]:
-        if u == user:
-            continue
-
-        tmp_ref = ref['review'][ref['item'][item][u]]
-
-        if item_token_cnt + len(tmp_ref) >= max_seq_length - 2:
-            tmp_ref = tmp_ref[-(max_seq_length - 2 - item_token_cnt):]
-            item_token_list.append(tmp_ref)
-            item_token_cnt += len(tmp_ref)
-            break
-        item_token_list.append(tmp_ref)
-        item_token_cnt += len(tmp_ref)
-
-    # add gt into random position
-
-    insertp = random.randint(0, len(item_token_list))
-    item_tags = []
-    for i, tokens in enumerate(item_token_list):
-        item_tokens.extend(tokens)
-        item_tags.extend([0] * len(tokens))
-        if i == insertp:
-            item_tokens.extend(item_tokens_gt)
-            item_tags.extend(item_tags_gt)
-
-    if insertp == len(item_token_list):
-        item_tokens.extend(item_tokens_gt)
-        item_tags.extend(item_tags_gt)
-
-    # label propagation
-
-    for b, e in example['phrase_pos']:
-        phrase = item_tokens_gt[b:e+1]
-        tag = [1] + [2] * (e-b)
-        length = len(phrase)
-        for s in range(len(item_tokens)-length):
-            phrase_test = item_tokens[s: s+length]
-            if phrase_test == phrase:
-                item_tags[s: s+length] = tag
-
-    # 'O' masking
-
-    if mode == 'train':
-        item_tags = [-100 if i == 0 and args.zero_tag_mask_prob >
-                     random.random() else i for i in item_tags]
-
-    # item tokens and item tags
-
-    item_tokens = [tokenizer.bos_token_id] + \
-        item_tokens + [tokenizer.sep_token_id]
-    item_tags = [-100] + item_tags + [-100]
-
-    # padding as numpy array
-
-    source_array = np.full(max_seq_length, dtype=np.int32,
-                           fill_value=tokenizer.pad_token_id)
-    source_array[:len(item_tokens)] = item_tokens
-
-    source_mask_array = np.zeros(max_seq_length, dtype=np.int32)
-    source_mask_array[: len(item_tokens)] = 1
-
-    ref_input_array = np.full(
-        max_seq_length, dtype=np.int32, fill_value=tokenizer.pad_token_id)
-    ref_input_array[:len(user_tokens)] = user_tokens
-
-    ref_mask_array = np.zeros(max_seq_length, dtype=np.int32)
-    ref_mask_array[: len(user_tokens)] = 1
-
-    item_tags_array = np.full(max_seq_length, dtype=np.int32, fill_value=-100)
-    item_tags_array[:len(item_tags)] = item_tags
-
-    features = ExtractionFeatures(input_ids=ref_input_array,
-                                  input_masks=ref_mask_array,
-                                  decoder_input_ids=source_array,
-                                  decoder_attention_mask=source_mask_array,
-                                  tag_labels=item_tags_array)
-    return features
-
-
 class FinetuningDataset(Dataset):
     def __init__(self, path, mode='train', tokenizer=None, args=None):
 
@@ -364,19 +195,6 @@ class FinetuningDataset(Dataset):
             open(os.path.join(path, "ref_review.json"), "r"))
         sent_dict = json.load(open(os.path.join(path, "sent_dict.json"), "r"))
         sent2topic = json.load(open(os.path.join(path, "sent2topic.json"), "r"))
-
-        self.sent2order = json.load(open(os.path.join(path, 'sent2order.json'), "r"))
-        self.sent2vec = np.load(os.path.join(path, 'sent2vec.npy'))
-
-        # ranking ref loading
-        if self.args.keywords == 'ranking':
-            self.item_keywords = json.load(
-                open(os.path.join(path, "ranking", "ref_item_keywords.json"), "r"))
-            self.item_keywords = {
-                i: set([tuple(k) for k in self.item_keywords[i]]) for i in self.item_keywords}
-            self.keyword_max_len = args.keyword_max_len
-            self.user2id = dict(
-                zip(list(user_ref.keys()), range(self.user_num)))
 
         self.ref = {
             "item": item_ref,
@@ -404,19 +222,6 @@ class FinetuningDataset(Dataset):
             torch.LongTensor(insertion_feature.ins_labels),
             torch.LongTensor(insertion_feature.lm_labels),
         )
-
-    def _extract(self, sample):
-
-        user = sample['user_id']
-        item = sample['item_id']
-
-        example = sample['tagging_data']
-        example.update({'userid': user, 'itemid': item})
-
-        features = convert_example_to_extraction_features(
-            example, self.tokenizer, self.args.max_len, ref=self.ref, mode=self.mode, args=self.args)
-
-        return features
 
     def _aspect(self, user, item):
 
@@ -473,7 +278,7 @@ class FinetuningDataset(Dataset):
         example.update({'userid': user, 'itemid': item})
 
         features = convert_example_to_insertion_features(
-            example, self.tokenizer, self.args.max_len, args=self.args, ref=self.ref, sent2order=self.sent2order, sent2vec=self.sent2vec)
+            example, self.tokenizer, self.args.max_len, args=self.args, ref=self.ref)
 
         new_features = InsertionFeatures(input_ids=features.input_ids,
                                         input_masks=features.input_masks,
@@ -487,55 +292,6 @@ class FinetuningDataset(Dataset):
                                         lm_labels=features.lm_labels)
 
         return new_features
-
-    def _rank(self, sample):
-
-        user = sample['user_id']
-        item = sample['item_id']
-        keywords = self.__extract_phrase(
-            token_ids=sample['tagging_data']['token_ids'],
-            phrase_pos=sample['tagging_data']['phrase_pos']
-        )
-        pos_set = set([tuple(k) for k in keywords])
-        neg_set = list(self.item_keywords[item] - pos_set)
-
-        cands = []
-
-        # pos
-        pos_keyword = list(random.choice(keywords)) if len(keywords) else []
-        pos_keyword = pos_keyword[:self.keyword_max_len] + (
-            self.keyword_max_len - len(pos_keyword)) * [self.tokenizer.pad_token_id]
-        cands.append(pos_keyword)
-
-        # neg
-        for _ in range(1):  # can be more
-            neg_keyword = list(random.choice(neg_set)) if len(neg_set) else []
-            neg_keyword = neg_keyword[:self.keyword_max_len] + (
-                self.keyword_max_len - len(neg_keyword)) * [self.tokenizer.pad_token_id]
-            cands.append(neg_keyword)
-
-        # import pdb; pdb.set_trace()
-
-        return self.user2id[user], cands
-
-    def __extract_phrase(self, token_ids, phrase_pos):
-        phrases = []
-        for b, e in phrase_pos:
-            phrase = tuple(token_ids[b:e+1])
-            phrases.append(phrase)
-        return phrases
-
-    def _keywords(self, sample):
-
-        user = sample['user_id']
-        item = sample['item_id']
-        example = sample['phrase_data']
-        example.update({'userid': user, 'itemid': item})
-
-        features = convert_example_to_insertion_features(
-            example, self.tokenizer, self.args.max_len, args=self.args, ref=self.ref)
-
-        return features
 
     def __len__(self):
         return len(self.data)

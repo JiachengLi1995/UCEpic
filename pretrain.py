@@ -19,7 +19,7 @@ from sklearn.metrics import classification_report
 from transformers import RobertaTokenizer, RobertaConfig
 from transformers import AdamW, get_linear_schedule_with_warmup
 
-from model import UCEpic
+from model import UCEpicForPretraining
 from utils import random_seed, last_commit_msg, save_dependencies
 
 NUM_PAD = 3
@@ -103,7 +103,7 @@ class PregeneratedDataset(Dataset):
         metrics_file = os.path.join(
             training_path, f"epoch_{self.data_epoch}_metrics.json")
         assert os.path.exists(data_file) and os.path.exists(metrics_file)
-        metrics = json.loads(metrics_file.read_text())
+        metrics = json.load(open(metrics_file))
         num_samples = metrics['num_training_examples']
         seq_len = metrics['max_seq_len']
         self.temp_dir = None
@@ -141,7 +141,7 @@ class PregeneratedDataset(Dataset):
                                 dtype=np.int32, fill_value=-100)
 
         logging.info(f"Loading training examples for epoch {epoch}")
-        with data_file.open() as f:
+        with open(data_file) as f:
             for i, line in enumerate(tqdm(f, ncols=100)):
                 line = line.strip()
                 example = json.loads(line)
@@ -251,7 +251,7 @@ def main():
         metrics_file = os.path.join(
             args.pregenerated_data, f"epoch_{i}_metrics.json")
         if os.path.exists(epoch_file) and os.path.exists(metrics_file):
-            metrics = json.loads(metrics_file.read_text())
+            metrics = json.load(open(metrics_file))
             samples_per_epoch.append(metrics['num_training_examples'])
             max_ins = max(max_ins, metrics['max_ins_num']+1)
         else:
@@ -322,11 +322,11 @@ def main():
 
     if args.from_scratch:
         config = RobertaConfig()
-        model = UCEpic()
+        model = UCEpicForPretraining()
     else:
         config = RobertaConfig.from_pretrained(args.bert_model)
         config.num_labels = max_ins
-        model = UCEpic.from_pretrained(args.bert_model, config=config)
+        model = UCEpicForPretraining.from_pretrained(args.bert_model, config=config)
 
     model.to(device)
 
@@ -404,13 +404,13 @@ def main():
 
             loss = outputs.loss
 
-            metrics["lm_correct"] += outputs.lm_correct
-            metrics["lm_total"] += outputs.lm_total
-            metrics["ins_pred"] += outputs.ins_pred
-            metrics["ins_true"] += outputs.ins_true
+            metrics["lm_correct"] += outputs.lm_correct.sum().cpu().item()
+            metrics["lm_total"] += outputs.lm_total.sum().cpu().item()
+            metrics["ins_pred"] += outputs.ins_pred.cpu().tolist()
+            metrics["ins_true"] += outputs.ins_true.cpu().tolist()
             metrics["lm_loss"].append(
-                outputs.masked_lm_loss.detach().cpu().item())
-            metrics["ins_loss"].append(outputs.ins_loss.detach().cpu().item())
+                outputs.masked_lm_loss.mean().detach().cpu().item())
+            metrics["ins_loss"].append(outputs.ins_loss.mean().detach().cpu().item())
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu.
@@ -537,10 +537,10 @@ def eval(eval_dataset, model, args, device, logger):
 
             outputs = model(**inputs)
 
-            metrics["lm_correct"] += outputs.lm_correct
-            metrics["lm_total"] += outputs.lm_total
-            metrics["ins_pred"] += outputs.ins_pred
-            metrics["ins_true"] += outputs.ins_true
+            metrics["lm_correct"] += outputs.lm_correct.sum().cpu().item()
+            metrics["lm_total"] += outputs.lm_total.sum().cpu().item()
+            metrics["ins_pred"] += outputs.ins_pred.cpu().tolist()
+            metrics["ins_true"] += outputs.ins_true.cpu().tolist()
 
             tqdm_loader.set_description(
                 f"Evaluation: lm_acc: {metrics['lm_correct'] / metrics['lm_total'] : .4f}")

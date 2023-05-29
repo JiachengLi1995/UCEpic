@@ -1,6 +1,6 @@
-DATA=beer
-CKPT=checkpoints/dev/update_7fbb99e8/output/beer/seed_42_2022-08-03-15-44-45/checkpoint-1048
-EXT=1
+DATA=yelp/finetune
+CKPT=/data1/jiacheng/UCEpic/checkpoints/main/init_c93e8ef2/output/yelp/finetune/seed_42_2023-05-28-17-15-45/checkpoint-102
+EXT=phrases
 NUM=-1
 CONTROL=hard
 
@@ -14,4 +14,4 @@ CUDA_VISIBLE_DEVICES=0 python finetune_inference.py \
     --eval true \
     --control ${CONTROL}
  
-CUDA_VISIBLE_DEVICES=0 python tools/compute_scores.py ${CKPT}/generated_${EXT}_bert_${CONTROL}_${NUM}.json
+CUDA_VISIBLE_DEVICES=0 python compute_scores.py ${CKPT}/generated_${EXT}_bert_${CONTROL}_${NUM}.json

@@ -21,6 +21,235 @@ class UCEpicOutput(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
 
+
+class UCEpicForPretraining(RobertaForMaskedLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        self.lm_head = RobertaLMHead(config)
+
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+        self.init_weights()
+
+    def lm_forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        lm_labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for computing the masked language modeling loss. Indices should be in ``[-100, 0, ...,
+            config.vocab_size]`` (see ``input_ids`` docstring) Tokens with indices set to ``-100`` are ignored
+            (masked), the loss is only computed for the tokens with labels in ``[0, ..., config.vocab_size]``
+        kwargs (:obj:`Dict[str, any]`, optional, defaults to `{}`):
+            Used to hide legacy arguments that have been deprecated.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.roberta(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = outputs[0]
+        prediction_scores = self.lm_head(sequence_output)
+
+        masked_lm_loss = None
+        correct = 0
+        total = 0
+        if lm_labels is not None:
+            loss_fct = nn.CrossEntropyLoss()
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), lm_labels.view(-1))
+
+            masked_lm_mask = lm_labels != -100
+            masked_lm_label = torch.masked_select(lm_labels, masked_lm_mask)
+            masked_prediction_scores = torch.masked_select(prediction_scores, masked_lm_mask.unsqueeze(-1)).view(-1, self.config.vocab_size)
+            if masked_prediction_scores.size(0) > 0:
+                correct = (torch.argmax(masked_prediction_scores, 1) == masked_lm_label).detach()#.sum().detach().cpu().item()
+                total = masked_lm_label.ne(-100).detach()#.sum().detach().cpu().item()
+
+
+        if not return_dict:
+            output = (prediction_scores,) + outputs[2:]
+            return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+
+        return UCEpicOutput(
+            masked_lm_loss=masked_lm_loss,
+            lm_logits=prediction_scores,
+            lm_correct=correct,
+            lm_total=total,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+    def ins_forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        ins_labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for computing the masked language modeling loss. Indices should be in ``[-100, 0, ...,
+            config.vocab_size]`` (see ``input_ids`` docstring) Tokens with indices set to ``-100`` are ignored
+            (masked), the loss is only computed for the tokens with labels in ``[0, ..., config.vocab_size]``
+        kwargs (:obj:`Dict[str, any]`, optional, defaults to `{}`):
+            Used to hide legacy arguments that have been deprecated.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.roberta(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = outputs[0]
+        sequence_output = self.dropout(sequence_output)
+        ins_scores = self.classifier(sequence_output)
+
+        ins_loss = None
+        ins_pred = []
+        ins_true = []
+        if ins_labels is not None:
+            loss_fct = nn.CrossEntropyLoss()
+            ins_loss = loss_fct(ins_scores.view(-1, self.config.num_labels), ins_labels.view(-1))
+
+            ins_mask = ins_labels != -100
+            masked_ins_labels = torch.masked_select(ins_labels, ins_mask).view(-1)
+            masked_ins_scores = torch.masked_select(ins_scores, ins_mask.unsqueeze(-1)).view(-1, self.config.num_labels)
+
+            ins_pred = torch.argmax(masked_ins_scores, dim=1).detach().long()#.cpu().tolist()
+            ins_true = masked_ins_labels.detach()#.cpu().tolist()
+
+        if not return_dict:
+            output = (ins_scores,) + outputs[2:]
+            return ((ins_loss,) + output) if ins_loss is not None else output
+
+        return UCEpicOutput(
+            ins_loss=ins_loss,
+            ins_logits=ins_scores,
+            ins_pred=ins_pred,
+            ins_true=ins_true,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+    def forward(
+        self,
+        input_ids_s=None,
+        attention_mask_s=None,
+        token_type_ids_s=None,
+        position_ids_s=None,
+        head_mask_s=None,
+        input_ids_m=None,
+        attention_mask_m=None,
+        token_type_ids_m=None,
+        position_ids_m=None,
+        head_mask_m=None,
+        lm_labels=None,
+        ins_labels=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+
+
+        ins_outputs = self.ins_forward(
+                        input_ids=input_ids_s,
+                        attention_mask=attention_mask_s,
+                        token_type_ids=token_type_ids_s,
+                        position_ids=position_ids_s,
+                        head_mask=head_mask_s,
+                        inputs_embeds=inputs_embeds,
+                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_attention_mask=encoder_attention_mask,
+                        ins_labels=ins_labels,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        return_dict=return_dict,
+                    )
+
+        lm_outputs = self.lm_forward(
+                        input_ids=input_ids_m,
+                        attention_mask=attention_mask_m,
+                        token_type_ids=token_type_ids_m,
+                        position_ids=position_ids_m,
+                        head_mask=head_mask_m,
+                        inputs_embeds=inputs_embeds,
+                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_attention_mask=encoder_attention_mask,
+                        lm_labels=lm_labels,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        return_dict=return_dict,
+                    )
+
+        loss = None
+        if ins_outputs.ins_loss is not None:
+            loss = ins_outputs.ins_loss
+
+        if lm_outputs.masked_lm_loss is not None:
+            if loss is not None:
+                loss += lm_outputs.masked_lm_loss
+            else:
+                loss = lm_outputs.masked_lm_loss
+
+        return UCEpicOutput(
+            loss=loss,
+            masked_lm_loss=lm_outputs.masked_lm_loss,
+            ins_loss=ins_outputs.ins_loss,
+            lm_logits=lm_outputs.lm_logits,
+            ins_logits=ins_outputs.ins_logits,
+            lm_correct=lm_outputs.lm_correct,
+            lm_total=lm_outputs.lm_total,
+            ins_pred=ins_outputs.ins_pred,
+            ins_true=ins_outputs.ins_true,
+            hidden_states=lm_outputs.hidden_states,
+            attentions=lm_outputs.attentions,
+        )
+
 class UCEpic(RobertaForMaskedLM):
     def __init__(self, config):
         super().__init__(config)

@@ -11,11 +11,10 @@ from tqdm import tqdm
 import random
 
 from transformers import RobertaTokenizer, RobertaConfig
-import torch.nn.functional as F
 
 from utils import boolean_string
 from model import UCEpic
-from dataset import construct_phrase_reference, construct_aspects, construct_reference
+from dataset import construct_phrase_reference
 from nltk.corpus import stopwords
 import numpy as np
 
@@ -75,7 +74,7 @@ class Generator(object):
 
     def __call__(self, gt=None, item_keywords=None, ref_input_array=None, ref_mask_array=None, aspects=None, aspects_mask=None):
         
-        source = item_keywords# if item_keywords is not None else [p[-1] for p in rule_based_noun_phrase(gt)]
+        source = item_keywords
         
         if self.args.control == 'soft':
             source = []
@@ -156,16 +155,9 @@ class Generator(object):
                 lm_logits = outputs.lm_logits
 
                 if self.prevent is not None:
-                    #for p in self.prevent:
-                    lm_logits[:,:,self.prevent] = -10#lm_logits[:,:,self.prevent] * PREVENT_FACTOR
-                
-                # if self.reduce is not None:
-                #     reduce_factor = min(float(loop_num) / args.reduce_decay, 1.0) 
-                #     #for p in self.reduce:
-                #     lm_logits[:,:,self.reduce] = lm_logits[:,:,self.reduce] * reduce_factor
+                    lm_logits[:,:,self.prevent] = -10
 
                 if self.args.lessrepeat:
-                    #for p in input_ids_.cpu().numpy()[0]:
                     p_list = input_ids_[0]
                     lm_logits[:,:,p_list] = lm_logits[:,:,p_list] * 0.1
 
@@ -173,9 +165,7 @@ class Generator(object):
                 input_ids = insert_token + (input_ids_ * (input_ids_ != self.tokenizer.mask_token_id))
 
                 # loop counter
-                loop_num += 1 
-
-                # print(f"TURN [{loop_num}]: {self.tokenizer.decode(input_ids.flatten().tolist())}" )
+                loop_num += 1
 
         if is_decoded:
             return self.tokenizer.decode(input_ids.flatten().tolist()[1:-1])
@@ -228,13 +218,10 @@ class FileEvaluator(object):
             "user": json.load(open(os.path.join(dir_path, "ref_user.json"))),
             "sent_dict": json.load(open(os.path.join(dir_path, "sent_dict.json"), "r")),
             "sent2topic": json.load(open(os.path.join(dir_path, "sent2topic.json"), "r")),
-            "sent2order": json.load(open(os.path.join(dir_path, 'sent2order.json'), "r")),
-            "sent2vec": np.load(os.path.join(dir_path, 'sent2vec.npy')),
-            "review": json.load(open(os.path.join(dir_path, "ref_review.json"), "r")),
-            "item2phrase": json.load(open(os.path.join(dir_path, "item_phrases.json"), "r"))
+            "review": json.load(open(os.path.join(dir_path, "ref_review.json"), "r"))
         }
         
-        self.data_file = [json.loads(line) for line in open(os.path.join(dir_path, f"test_robust.json"))]#[:500]
+        self.data_file = [json.loads(line) for line in open(os.path.join(dir_path, f"test.json"))]
         self.output_file = open(os.path.join(output_path, f"{output}.json"), "w")
         self.generator = generator
         self.tokenizer = tokenizer
@@ -271,33 +258,18 @@ class FileEvaluator(object):
 
         return res.strip()
 
-    def hard_constraints(self, item):
-
-        phrases = self.ref["item2phrase"][item]
-        
-        phrase = phrases[0][0]
-
-        #phrase = phrases[random.randint(0, len(phrases)-1)][0]
-
-        return [phrase]
-
     def evaluate(self):
         cnt = 0
-        for i, l in enumerate(tqdm(self.data_file, ncols=50)): # TODO: debug
+        for i, l in enumerate(tqdm(self.data_file, ncols=50)):
             
-
             user, item = l['user_id'], l['item_id']
             
-            #ref_input_array, ref_mask_array = construct_reference(user=user, item=item, ref=self.ref, tokenizer=tokenizer)
-            #ref_input_array, ref_mask_array = construct_reference_embeddings(user, item, self.args.max_seq_length, self.ref["sent2order"], self.ref["sent2vec"], self.ref)
             ref_input_array, ref_mask_array = construct_phrase_reference(user=user, item=item, ref=self.ref, tokenizer=self.tokenizer)
-            #aspects, aspects_mask = construct_aspects(user, item, self.args.num_aspects, self.ref)
             aspects, aspects_mask, phrase_mention = self._aspect(user, item)
 
             gt = self.tokenizer.decode(l['insertion_data'][0]['source'][1:-1])
 
-            #self.hard_constraints(item)
-            res = self.generator(gt, l[str(self.args.phrase_key)], ref_input_array, ref_mask_array, aspects, aspects_mask)#self.item_keywords[item]) #TODO: debug item not in item_keywords
+            res = self.generator(gt, l[str(self.args.phrase_key)], ref_input_array, ref_mask_array, aspects, aspects_mask)
 
             res = {"aspect_id": int(aspects[0]), "aspect": phrase_mention, "gen": self.postprocess(res), "gt": gt}
             self.output_file.write(f"{json.dumps(res)}\n")

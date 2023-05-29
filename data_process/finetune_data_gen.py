@@ -6,7 +6,7 @@ import os
 from collections import defaultdict
 from multiprocessing import Pool
 import spacy
-from pretrain_data_gen import SentenceProcessor
+from processor import SentenceProcessor
 
 from transformers import RobertaTokenizerFast
 
